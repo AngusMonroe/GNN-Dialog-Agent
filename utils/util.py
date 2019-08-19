@@ -6,6 +6,7 @@ import torch
 import os
 import json
 from utils.vocab import *
+from data.duconv.dataloader import loadConversations
 
 
 # Turn a Unicode string to plain ASCII, thanks to https://stackoverflow.com/a/518232/2809427
@@ -29,11 +30,14 @@ def normalizeString(s):
 def readVocs(trainfile, datafile, corpus_name):
     print("Reading lines...")
     # Read the file and split into lines
-    lines = open(trainfile, encoding='utf-8').readlines()
     sentences = [[s for s in line[:-1].split('\t')] for line in open(datafile, encoding='utf-8').readlines()]
     # sentences = [[normalizeString(s) for s in line.split('\t')] for line in open(datafile, encoding='utf-8').readlines()]
     # Split every line into pairs and normalize
-    pairs = [[s for s in l[:-1].split('\t')] for l in lines]
+    if corpus_name == 'duconv':
+        pairs = loadConversations(trainfile)
+    else:
+        lines = open(trainfile, encoding='utf-8').readlines()
+        pairs = [[s for s in l[:-1].split('\t')] for l in lines]
     # pairs = [[normalizeString(s) for s in l.split('\t')] for l in lines]
     voc = Voc(corpus_name)
     return voc, pairs, sentences
@@ -51,7 +55,7 @@ def filterPairs(pairs, MAX_LENGTH):
 
 
 # Using the functions defined above, return a populated voc object and pairs list
-def loadPrepareData(corpus, corpus_name, trainfile, datafile, save_dir, MAX_LENGTH):
+def loadPrepareData(corpus_name, trainfile, datafile, MAX_LENGTH):
     print("Start preparing training data ...")
     voc, pairs, sentences = readVocs(trainfile, datafile, corpus_name)
     print("Read {!s} sentence pairs".format(len(pairs)))
