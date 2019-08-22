@@ -10,7 +10,10 @@ import torch
 from torch.jit import script, trace
 import torch.nn as nn
 from torch import optim
+from torch.autograd import Variable
 import torch.nn.functional as F
+from torchtext.vocab import GloVe, Vectors
+from torchtext import data, datasets, vocab
 import csv
 import random
 import re
@@ -24,8 +27,8 @@ import time
 from utils.util import *
 from model import *
 from eval import *
-from torchtext.vocab import GloVe, Vectors
-from torchtext import data, datasets, vocab
+from data.duconv.dataloader import DuconvDataset, DuconvDataloader
+
 
 optparser = optparse.OptionParser()
 optparser.add_option(
@@ -38,7 +41,7 @@ optparser.add_option(
     help="Data file name"
 )
 optparser.add_option(
-    "-T", "--train_file", default="train.dat",
+    "-T", "--train_file", default="train.txt",
     help="Train file name"
 )
 optparser.add_option(
@@ -70,7 +73,7 @@ optparser.add_option(
     help="Dropout"
 )
 optparser.add_option(
-    "-B", "--batch_size", default=256,
+    "-B", "--batch_size", default=50,
     help="Batch size"
 )
 optparser.add_option(
@@ -101,6 +104,50 @@ optparser.add_option(
     "-S", "--save_every", default=1000,
     help="Save frequency"
 )
+# optparser.add_option(
+#     '--task_id', default=4,
+#     help='bAbI task id'
+# )
+# optparser.add_option(
+#     '--question_id', default=0,
+#     help='question types'
+# )
+# optparser.add_option(
+#     '--workers', default=2,
+#     help='number of data loading workers'
+# )
+# optparser.add_option(
+#     '--batchSize', default=10,
+#     help='input batch size'
+# )
+optparser.add_option(
+    '--state_dim', default=4,
+    help='GGNN hidden state size'
+)
+optparser.add_option(
+    '--n_steps', default=5,
+    help='propogation steps number of GGNN'
+)
+# optparser.add_option(
+#     '--niter', default=10,
+#     help='number of epochs to train for'
+# )
+# optparser.add_option(
+#     '--lr', default=0.01,
+#     help='learning rate'
+# )
+optparser.add_option(
+    '--cuda', action='store_true',
+    help='enables cuda'
+)
+optparser.add_option(
+    '--verbal', action='store_true',
+    help='print training info or not'
+)
+optparser.add_option(
+    '--manualSeed',
+    help='manual seed'
+)
 
 
 opts = optparser.parse_args()[0]
@@ -127,6 +174,9 @@ learning_rate = opts.learning_rate
 n_iteration = opts.n_iteration
 print_every = opts.print_every
 save_every = opts.save_every
+# Configure GNN
+state_dim = opts.state_dim
+n_steps = opts.n_steps
 
 corpus = os.path.join("data", corpus_name)
 # Define path to new file
@@ -137,6 +187,7 @@ USE_CUDA = torch.cuda.is_available()
 device = torch.device("cuda" if USE_CUDA else "cpu")
 
 MAX_LENGTH = 10
+annotation_dim = 1
 
 # Load/Assemble voc and pairs
 cache = '.vector_cache'
@@ -145,12 +196,16 @@ if not os.path.exists(cache):
 
 # TEXT.build_vocab(pos, vectors=GloVe(name='6B', dim=300))
 save_dir = os.path.join("model", corpus_name)
-voc, pairs = loadPrepareData(corpus, corpus_name, trainfile, datafile, save_dir, MAX_LENGTH)
+voc, pairs = loadPrepareData(corpus_name, trainfile, datafile, MAX_LENGTH)
 # Print some pairs to validate
-print("pairs:\n")
-for pair in pairs[:10]:
-    print(pair)
+# print("pairs:\n")
+# for pair in pairs[:10]:
+#     print(pair)
 
+# Initialize dataset
+dataset = DuconvDataset(trainfile, os.path.join(corpus, 'test.txt'), corpus_name, datafile, MAX_LENGTH)
+dataloader = DuconvDataloader(dataset, batch_size, shuffle=True, num_workers=2)
+print(dataloader.dataset)
 # Trim voc and pairs
 # pairs = trimRareWords(voc, pairs)
 
@@ -167,7 +222,7 @@ for pair in pairs[:10]:
 
 
 def train(input_variable, lengths, target_variable, mask, max_target_len, seq2seq,
-          embedding, seq2seq_optimizer, batch_size, clip, max_length=MAX_LENGTH):
+          seq2seq_optimizer, adj_matrix, batch_size, clip, max_length=MAX_LENGTH):
 
     # Zero gradients
     seq2seq_optimizer.zero_grad()
@@ -178,7 +233,20 @@ def train(input_variable, lengths, target_variable, mask, max_target_len, seq2se
     target_variable = target_variable.to(device)
     mask = mask.to(device)
 
-    loss, print_losses, n_totals = seq2seq(input_variable, lengths, batch_size, teacher_forcing_ratio, max_target_len, target_variable, mask)
+    init_input = torch.zeros(n_node, state_dim - annotation_dim).double()
+    init_input = init_input.to(device)
+    adj_matrix = torch.FloatTensor(adj_matrix)
+    print(adj_matrix.size())
+    adj_matrix = adj_matrix.to(device)
+    # annotation = annotation.to(device)
+    # target = target.to(device)
+
+    init_input = Variable(init_input)
+    adj_matrix = Variable(adj_matrix)
+    # annotation = Variable(annotation)
+    # target = Variable(target)
+
+    loss, print_losses, n_totals = seq2seq(input_variable, lengths, batch_size, teacher_forcing_ratio, max_target_len, target_variable, mask, init_input, adj_matrix)
 
     # Perform backpropatation
     loss.backward()
@@ -192,11 +260,11 @@ def train(input_variable, lengths, target_variable, mask, max_target_len, seq2se
     return sum(print_losses) / n_totals
 
 
-def trainIters(voc, pairs, seq2seq, seq2seq_optimizer, embedding, save_dir, n_iteration, batch_size, print_every, save_every, clip, loadFilename, time_str):
+def trainIters(voc, pairs, seq2seq, seq2seq_optimizer, save_dir, n_iteration, batch_size, print_every, save_every, clip, loadFilename, time_str):
 
     # Load batches for each iteration
     training_batches = [batch2TrainData(voc, [random.choice(pairs) for _ in range(batch_size)])
-                      for _ in range(n_iteration)]
+                        for _ in range(n_iteration)]
 
     # Initializations
     print('Initializing ...')
@@ -204,16 +272,19 @@ def trainIters(voc, pairs, seq2seq, seq2seq_optimizer, embedding, save_dir, n_it
     print_loss = 0
     if loadFilename:
         start_iteration = checkpoint['iteration'] + 1
+    net.train()
 
     # Training loop
     print("Training...")
+    adj_matrix = dataloader.dataset[0]
+    print(adj_matrix)
     for iteration in range(start_iteration, n_iteration + 1):
         training_batch = training_batches[iteration - 1]
         # Extract fields from batch
         input_variable, lengths, target_variable, mask, max_target_len = training_batch
 
         # Run a training iteration with batch
-        loss = train(input_variable, lengths, target_variable, mask, max_target_len, seq2seq, embedding, seq2seq_optimizer, batch_size, clip)
+        loss = train(input_variable, lengths, target_variable, mask, max_target_len, seq2seq, seq2seq_optimizer, adj_matrix, batch_size, clip)
         print_loss += loss
 
         # Print progress
@@ -246,7 +317,7 @@ if loadFilename:
     # If loading on same machine the model was trained on
     checkpoint = torch.load(loadFilename)
     # If loading a model trained on GPU to CPU
-    #checkpoint = torch.load(loadFilename, map_location=torch.device('cpu'))
+    # checkpoint = torch.load(loadFilename, map_location=torch.device('cpu'))
     encoder_sd = checkpoint['en']
     decoder_sd = checkpoint['de']
     encoder_optimizer_sd = checkpoint['en_opt']
@@ -256,6 +327,13 @@ if loadFilename:
 
 
 print('Building encoder and decoder ...')
+# Initialize GNN
+n_edge_types = dataset.n_edge_types
+n_node = dataset.n_node
+net = GGNN(state_dim, annotation_dim, n_edge_types, n_node, n_steps)
+net.double()
+print(net)
+
 # Initialize word embeddings
 embedding = nn.Embedding(voc.num_words, hidden_size)
 weight_matrix = Vectors(glove_path)
@@ -271,7 +349,7 @@ decoder = LuongAttnDecoderRNN(attn_model, embedding, hidden_size, voc.num_words,
 if loadFilename:
     encoder.load_state_dict(encoder_sd)
     decoder.load_state_dict(decoder_sd)
-seq2seq = Seq2Seq(encoder, decoder, opts)
+seq2seq = Seq2Seq(encoder, decoder, net, opts)
 # Use appropriate device
 seq2seq.to(device)
 print('Models built and ready to go!')
@@ -288,8 +366,8 @@ print("Starting Training!")
 time_str = time.strftime("%Y%m%d-%H%M%S", time.localtime())
 writeParaLog(opts, time_str)
 save_path = trainIters(voc, pairs, seq2seq, seq2seq_optimizer,
-           embedding, save_dir, n_iteration, batch_size,
-           print_every, save_every, clip, loadFilename, time_str)
+            save_dir, n_iteration, batch_size,
+            print_every, save_every, clip, loadFilename, time_str)
 
 # Set dropout layers to eval mode
 seq2seq.eval()
