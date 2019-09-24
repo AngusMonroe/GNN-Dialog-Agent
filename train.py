@@ -73,7 +73,7 @@ optparser.add_option(
     help="Dropout"
 )
 optparser.add_option(
-    "-B", "--batch_size", default=50,
+    "-B", "--batch_size", default=32,
     help="Batch size"
 )
 optparser.add_option(
@@ -120,10 +120,10 @@ optparser.add_option(
 #     '--batchSize', default=10,
 #     help='input batch size'
 # )
-optparser.add_option(
-    '--state_dim', default=4,
-    help='GGNN hidden state size'
-)
+# optparser.add_option(
+#     '--state_dim', default=2913,
+#     help='GGNN hidden state size'
+# )
 optparser.add_option(
     '--n_steps', default=5,
     help='propogation steps number of GGNN'
@@ -175,7 +175,7 @@ n_iteration = opts.n_iteration
 print_every = opts.print_every
 save_every = opts.save_every
 # Configure GNN
-state_dim = opts.state_dim
+# state_dim = opts.state_dim
 n_steps = opts.n_steps
 
 corpus = os.path.join("data", corpus_name)
@@ -220,6 +220,57 @@ print(dataloader.dataset)
 # print("mask:", mask)
 # print("max_target_len:", max_target_len)
 
+# Set checkpoint to load from; set to None if starting from scratch
+loadFilename = None
+# checkpoint_iter = 4000
+# loadFilename = os.path.join(save_dir, model_name, corpus_name,
+#                             '{}-{}_{}'.format(encoder_n_layers, decoder_n_layers, hidden_size),
+#                             '{}_checkpoint.tar'.format(checkpoint_iter))
+
+
+# Load model if a loadFilename is provided
+if loadFilename:
+    # If loading on same machine the model was trained on
+    checkpoint = torch.load(loadFilename)
+    # If loading a model trained on GPU to CPU
+    # checkpoint = torch.load(loadFilename, map_location=torch.device('cpu'))
+    encoder_sd = checkpoint['en']
+    decoder_sd = checkpoint['de']
+    encoder_optimizer_sd = checkpoint['en_opt']
+    decoder_optimizer_sd = checkpoint['de_opt']
+    embedding_sd = checkpoint['embedding']
+    voc.__dict__ = checkpoint['voc_dict']
+
+
+print('Building encoder and decoder ...')
+# Initialize GNN
+n_edge_types = dataset.n_edge_types
+n_node = dataset.n_node
+state_dim = dataset.state_dim
+net = GGNN(state_dim, annotation_dim, n_edge_types, n_node, n_steps)
+net.double()
+print(net)
+
+# Initialize word embeddings
+embedding = nn.Embedding(voc.num_words, hidden_size)
+weight_matrix = Vectors(glove_path)
+voc.getEmb(weight_matrix)
+print(torch.FloatTensor(np.array(voc.index2emb)).size())
+embedding.weight.data.copy_(torch.FloatTensor(np.array(voc.index2emb)))
+embedding.weight.requires_grad = False
+if loadFilename:
+    embedding.load_state_dict(embedding_sd)
+# Initialize encoder & decoder models
+encoder = EncoderRNN(hidden_size, embedding, encoder_n_layers, dropout)
+decoder = LuongAttnDecoderRNN(attn_model, embedding, hidden_size, voc.num_words, decoder_n_layers, dropout)
+if loadFilename:
+    encoder.load_state_dict(encoder_sd)
+    decoder.load_state_dict(decoder_sd)
+seq2seq = Seq2Seq(encoder, decoder, net, opts)
+# Use appropriate device
+seq2seq.to(device)
+print('Models built and ready to go!')
+
 
 def train(input_variable, lengths, target_variable, mask, max_target_len, seq2seq,
           seq2seq_optimizer, adj_matrix, batch_size, clip, max_length=MAX_LENGTH):
@@ -233,7 +284,8 @@ def train(input_variable, lengths, target_variable, mask, max_target_len, seq2se
     target_variable = target_variable.to(device)
     mask = mask.to(device)
 
-    init_input = torch.zeros(n_node, state_dim - annotation_dim).double()
+    # init_input = torch.zeros(n_node, state_dim - annotation_dim).double()
+    init_input = torch.zeros(n_node, state_dim).double()
     init_input = init_input.to(device)
     adj_matrix = torch.FloatTensor(adj_matrix)
     print(adj_matrix.size())
@@ -303,56 +355,6 @@ def trainIters(voc, pairs, seq2seq, seq2seq_optimizer, save_dir, n_iteration, ba
 
     return save_path
 
-
-# Set checkpoint to load from; set to None if starting from scratch
-loadFilename = None
-# checkpoint_iter = 4000
-# loadFilename = os.path.join(save_dir, model_name, corpus_name,
-#                             '{}-{}_{}'.format(encoder_n_layers, decoder_n_layers, hidden_size),
-#                             '{}_checkpoint.tar'.format(checkpoint_iter))
-
-
-# Load model if a loadFilename is provided
-if loadFilename:
-    # If loading on same machine the model was trained on
-    checkpoint = torch.load(loadFilename)
-    # If loading a model trained on GPU to CPU
-    # checkpoint = torch.load(loadFilename, map_location=torch.device('cpu'))
-    encoder_sd = checkpoint['en']
-    decoder_sd = checkpoint['de']
-    encoder_optimizer_sd = checkpoint['en_opt']
-    decoder_optimizer_sd = checkpoint['de_opt']
-    embedding_sd = checkpoint['embedding']
-    voc.__dict__ = checkpoint['voc_dict']
-
-
-print('Building encoder and decoder ...')
-# Initialize GNN
-n_edge_types = dataset.n_edge_types
-n_node = dataset.n_node
-net = GGNN(state_dim, annotation_dim, n_edge_types, n_node, n_steps)
-net.double()
-print(net)
-
-# Initialize word embeddings
-embedding = nn.Embedding(voc.num_words, hidden_size)
-weight_matrix = Vectors(glove_path)
-voc.getEmb(weight_matrix)
-print(torch.FloatTensor(np.array(voc.index2emb)).size())
-embedding.weight.data.copy_(torch.FloatTensor(np.array(voc.index2emb)))
-embedding.weight.requires_grad = False
-if loadFilename:
-    embedding.load_state_dict(embedding_sd)
-# Initialize encoder & decoder models
-encoder = EncoderRNN(hidden_size, embedding, encoder_n_layers, dropout)
-decoder = LuongAttnDecoderRNN(attn_model, embedding, hidden_size, voc.num_words, decoder_n_layers, dropout)
-if loadFilename:
-    encoder.load_state_dict(encoder_sd)
-    decoder.load_state_dict(decoder_sd)
-seq2seq = Seq2Seq(encoder, decoder, net, opts)
-# Use appropriate device
-seq2seq.to(device)
-print('Models built and ready to go!')
 
 # Ensure dropout layers are in train mode
 seq2seq.train()

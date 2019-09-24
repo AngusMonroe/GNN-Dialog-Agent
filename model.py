@@ -251,11 +251,12 @@ class Propogator(nn.Module):
         )
 
     def forward(self, state_in, state_out, state_cur, A):
-        A_in = A[:, :, :self.n_node*self.n_edge_types]
-        A_out = A[:, :, self.n_node*self.n_edge_types:]
-
-        a_in = torch.bmm(A_in, state_in)
-        a_out = torch.bmm(A_out, state_out)
+        A_in = torch.DoubleTensor(A[:, :self.n_node*self.n_edge_types])
+        A_out = torch.DoubleTensor(A[:, self.n_node*self.n_edge_types:])
+        a_in = torch.matmul(A_in, state_in.transpose(0, 1))
+        a_out = torch.matmul(A_out, state_out.transpose())
+        # a_in = torch.bmm(A_in, state_in)
+        # a_out = torch.bmm(A_out, state_out)
         a = torch.cat((a_in, a_out, state_cur), 2)
 
         r = self.reset_gate(a)
